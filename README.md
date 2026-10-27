@@ -134,3 +134,38 @@ Final run: few-shot, `TOKEN_BUDGET = 100000`, saved to `outputs/triage_results.c
 
 Rule-validated by code (JSON or single-keyword check): 147 tickets. Sent to humans: 17 tickets.
 
+
+## Part D
+
+Script: `src/part_d_rag.py` (tasks 1-4; the agent in tasks 5-9 imports `retrieve` from it).
+
+### Tasks 1-4: Policy RAG assistant
+
+**Chunking (task 1).** Each of the five policy files is split into 40-word chunks with a 10-word overlap (a new chunk starts 30 words after the previous one, and splitting stops after the first chunk whose end reaches or passes the last word). Every chunk keeps its source file name.
+
+| File | Chunks |
+|---|---|
+| refund_policy.txt | 4 |
+| delivery_policy.txt | 3 |
+| escalation_policy.txt | 3 |
+| payment_policy.txt | 3 |
+| privacy_policy.txt | 2 |
+| **Total** | **15** |
+
+**Retrieval (task 2).** `TfidfVectorizer()` is fitted on the 15 chunk texts, a query is transformed with the same fitted vectorizer, and chunks are ranked by cosine similarity. `retrieve(query, k=3)` returns dictionaries with `source`, `score` and `text`. For the query `refund policy late delivery` the top three chunks all come from `refund_policy.txt` (scores 0.2719, 0.2514, 0.2454).
+
+TF (term frequency) measures how often a word appears inside a chunk, and IDF (inverse document frequency) lowers the weight of words that appear in many chunks, so rare, distinctive words count more. A limitation is that TF-IDF only matches exact words: a question phrased as "money back" would not match a chunk that says "refund", because the two phrasings share no words even though they mean the same thing.
+
+**Augment and answer (task 3).** `answer(question)` retrieves three chunks and sends two messages to `mock_llm.chat`: a system message containing `POLICY ASSISTANT` (answer only from the context, otherwise say the information could not be found) and a user message of the form `CONTEXT:`, the three chunks each prefixed with `[<source file name>]`, then `QUESTION:` and the question. It returns the model text and the sources used.
+
+**Evaluation (task 4).** Questions come from `data/raw/policy_eval.csv` (12 answerable, 2 not covered by any document).
+
+| Metric | Overlap 10 | Overlap 0 |
+|---|---|---|
+| Chunks | 15 | 13 |
+| Answerable: `expected_doc` in top 3 | 12/12 | 12/12 |
+| Answerable: answer contains `expected_fact` | 12/12 | 10/12 |
+| Unanswerable: fallback `I could not find...` | 2/2 | 2/2 |
+
+With zero overlap two questions break. "What delivery time makes a completed order eligible for a full refund?" returns only "receives a full refund of the order amount.", because the sentence containing "more than 45 minutes" is cut across a chunk boundary and the condition ends up in the previous chunk. "How soon is money returned when a payment fails but is deducted?" returns the sentence up to "returned automatically", and the words "within 48 hours" fall into the next chunk. In both cases the right document was retrieved, but the answer sentence was split in two. The 10-word overlap repeats the boundary words in both neighbouring chunks, so these short facts stay together in at least one chunk.
+
