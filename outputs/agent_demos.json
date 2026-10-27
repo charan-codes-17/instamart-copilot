@@ -1,0 +1,25 @@
+{
+ "token_limit_200": {
+  "status": "FALLBACK_TOKEN_LIMIT",
+  "llm_calls": 3,
+  "tokens_used": 456,
+  "final_answer": "FALLBACK_TOKEN_LIMIT: stopped after 3 model calls and 2 tool steps (get_order, search_policy). Please handle this refund request manually."
+ },
+ "time_limit_0": {
+  "status": "FALLBACK_TIMEOUT",
+  "llm_calls": 0,
+  "tokens_used": 0,
+  "final_answer": "FALLBACK_TIMEOUT: stopped after 0 model calls and 0 tool steps (none). Please handle this refund request manually."
+ },
+ "crash_resume": {
+  "tools_executed": [
+   "get_order",
+   "search_policy",
+   "calculate_refund",
+   "issue_refund"
+  ],
+  "status": "REFUND",
+  "refund_inr": 128.25,
+  "llm_calls": 5
+ }
+}

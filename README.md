@@ -169,3 +169,49 @@ TF (term frequency) measures how often a word appears inside a chunk, and IDF (i
 
 With zero overlap two questions break. "What delivery time makes a completed order eligible for a full refund?" returns only "receives a full refund of the order amount.", because the sentence containing "more than 45 minutes" is cut across a chunk boundary and the condition ends up in the previous chunk. "How soon is money returned when a payment fails but is deducted?" returns the sentence up to "returned automatically", and the words "within 48 hours" fall into the next chunk. In both cases the right document was retrieved, but the answer sentence was split in two. The 10-word overlap repeats the boundary words in both neighbouring chunks, so these short facts stay together in at least one chunk.
 
+
+### Tasks 5-8: Refund agent
+
+Script: `src/part_d_agent.py` (imports `retrieve` from `src/part_d_rag.py`). Running it clears and rewrites `outputs/agent_runs.jsonl`, `outputs/refund_ledger.jsonl`, `outputs/agent_demos.json` and `state/`, so every run reproduces the same files.
+
+**Tools (task 5).** `TOOLS_SPEC` lists five tools and `TOOL_MAP` maps each name to its Python function: `get_order` (reads `data/instamart.db`), `search_policy` (returns `retrieve` output under `results`), `calculate_refund` (100% of the order amount if delivery took more than 45 minutes, otherwise 0), `issue_refund` and `escalate_to_human` (each append one JSON line with a timestamp and the tool name to `outputs/refund_ledger.jsonl`). The agent looks the requested name up in `TOOL_MAP` and calls the function with the model's `arguments`.
+
+**ReAct loop (task 6).** `run_agent(user_message, scenario_id, max_iterations=6, token_limit=6000, time_limit_seconds=10)` calls the model, executes any requested tool, appends the assistant and tool messages, and repeats until the model gives a final answer. The status is the word before the colon in that answer. All seven scenarios give the expected outcome, and every refund amount equals `expected_refund_inr` within 0.01.
+
+| Scenario | Status | Refund (INR) | Model calls | Tokens used |
+|---|---|---|---|---|
+| S1 | REFUND | 128.25 | 5 | 1,067 |
+| S2 | REFUND | 135.00 | 5 | 1,067 |
+| S3 | ESCALATE | 1,999.00 (escalated, not issued) | 5 | 1,054 |
+| S4 | DENIED | 0.00 | 4 | 741 |
+| S5 | DENIED | 0.00 | 3 | 439 |
+| S6 | NOT_FOUND | 0.00 | 2 | 140 |
+| S7 | FALLBACK_MAX_ITERATIONS | 0.00 | 6 | 3,204 |
+
+S7 contains `[LOOP]`, so the mock keeps requesting `search_policy`. It uses all six model calls and stops with `FALLBACK_MAX_ITERATIONS`, below the default token limit of 6000, so the token limit does not stop it early.
+
+**Stop safely (task 7).** Three limits are enforced: `max_iterations` model calls, `token_limit` (checked after each call, before the requested tool is executed) and `time_limit_seconds` (checked at the top of each iteration with `time.monotonic()`). Every fallback returns the steps completed so far and a short human-handoff summary in `final_answer`.
+
+| Demonstration | Status | Model calls | Tokens used |
+|---|---|---|---|
+| S1 with `token_limit=200` | FALLBACK_TOKEN_LIMIT | 3 | 456 |
+| S1 with `time_limit_seconds=0` | FALLBACK_TIMEOUT | 0 | 0 |
+
+In the token-limit demo, the tool requested by the third call was not executed (only `get_order` and `search_policy` had run). In the timeout demo the loop stops before the first model call.
+
+**Checkpoint and resume (task 8).** After every tool observation the agent writes `state/<run_id>.json` containing the run id, scenario id, full message list, `tokens_used`, step number and the tools executed so far. `resume_agent(run_id)` reloads that file and continues. For S1 a simulated crash was raised right after the second tool execution. The checkpoint then listed `get_order, search_policy`, and after `resume_agent` the tools executed across both parts were, in order:
+
+1. `get_order`
+2. `search_policy`
+3. `calculate_refund`
+4. `issue_refund`
+
+That is four executions, none repeated. The final status is `REFUND` with INR 128.25 (5 model calls, 1,067 tokens). The ledger therefore has four lines: S1, S2 and S3 from the scenario runs plus one more S1 line (run id `S1_crash`) written by the crash-and-resume demonstration. That extra line is a demo of resume and not a duplicate refund in the scenario runs.
+
+### Task 9: ReAct versus plan-and-execute
+
+ReAct makes one model call per step. Measured: S1 and S2 took 5 calls (1,067 tokens), S3 5 (1,054), S4 4 (741), S5 3 (439), S6 2 (140). Every call re-sends the growing message history, so tokens grow faster than calls. Plan-and-execute asks the model once for the full step list, runs the tools without the model, and calls it again only to write the answer or to replan. A normal refund would need about 2 calls instead of 5 and fewer tokens, because the history is not re-sent at each step.
+
+The cost is rigidity. The plan is written before any observation, so it cannot know that an order is missing (S6), cancelled (S5), on time (S4) or above INR 1000 (S3, which needed `escalate_to_human` instead of `issue_refund`). It must either contain conditional branches or replan after an unexpected observation, and each replan adds calls and tokens back. In ReAct each observation decides the next step: S6 stopped after 2 calls on NOT_FOUND, and S5 stopped after the policy search without calling `calculate_refund`.
+
+For this refund workflow I would choose ReAct. Money is involved, the correct path depends on real order data, and the extra two or three calls are cheap. The hard limits (6 calls, token cap, timeout) already bound its cost, as S7 shows: it was stopped at 6 calls and 3,204 tokens.
