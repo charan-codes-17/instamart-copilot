@@ -68,3 +68,69 @@ Top 5 random-forest importances: frequency 0.280, monetary 0.271, recency 0.115,
 Logistic regression coefficients (standardised features, C=100): frequency -1.70 (more orders, much less likely to lapse); recency +0.04 (a longer gap makes lapse slightly more likely, a very weak effect); monetary +0.28 (positive once frequency is held fixed, which is counter-intuitive and is most likely an artefact of monetary and frequency being strongly correlated, so it should not be read as "big spenders lapse").
 The selected model was saved with `joblib.dump` to `outputs/lapse_model.joblib`; the reloaded model reproduces the original test predictions exactly.
 Retention list (`outputs/retention_list.csv`): top 10 Premium customers of the test set by predicted lapse probability (highest 0.487); 1 of the 10 truly lapsed. This list is illustrative and not a leakage-free evaluation, because the Premium flag comes from the whole-window RFM of task 3, which includes the September window that defines the lapse label.
+
+
+### C1. Input guardrails
+Of 164 tickets, 4 are empty (status `skipped_empty`) and 4 exceed `MAX_INPUT_TOKENS = 400` (status `flagged_long`, each estimated at 734 tokens). None of these 8 was sent to the model: model calls were made for exactly the 156 eligible tickets (asserted in code).
+
+### C2. Redaction
+Patterns applied in this order: email, phone, order id.
+
+| Type | Substitutions |
+|---|---|
+| Email | 55 |
+| Phone | 91 |
+| Order id | 132 |
+| Total | 278 |
+
+Re-applying the three patterns to the redacted texts finds 0 matches. The user message sent to the model is exactly the redacted text, and an assertion confirms no email, phone or order id appears in any prompt.
+
+### C3. Prompts
+Zero-shot prompt: about 33 estimated tokens, contains `CLASSIFY`, the four categories and the JSON-only format, no `EXAMPLES:`. Few-shot prompt: about 120 estimated tokens, the same text plus an `EXAMPLES:` line with four labelled examples (billing, technical, fraud, delivery).
+
+### C4. Retries
+Maximum 3 retries per ticket; wait before retry n = `0.05 x 2**n x random.uniform(0.9, 1.15)`; one log line per retry; `mock_llm.reset()` before every full run. A full run has 19 `TransientLLMError`s, all recovered by one retry (every retry is retry number 0), 0 permanent errors. Observed waits: 0.0451 to 0.0574 s, inside the 0.045 to 0.0575 s range.
+
+### C5. Output validation
+Replies are parsed as JSON (`classified_json` if the category is allowed). Otherwise the lowercase words from `re.findall(r"[a-z]+", text.lower())` are checked and the reply is accepted (`classified_keyword`) only if exactly one allowed category word is present. Everything else is `flagged_invalid_output` and goes to human review; nothing is guessed.
+
+| Status | Count (each full run) |
+|---|---|
+| classified_json | 135 |
+| classified_keyword | 12 |
+| flagged_invalid_output | 9 |
+| skipped_empty | 4 |
+| flagged_long | 4 |
+
+### C6. Zero-shot versus few-shot
+
+| Run | Classified | Correct | Accuracy | Total tokens | Tokens per classified ticket |
+|---|---|---|---|---|---|
+| Zero-shot | 147 | 126 | 85.7% | 9,556 | 65.01 |
+| Few-shot | 147 | 147 | 100.0% | 23,128 | 157.33 |
+
+Zero-shot confusion table (rows = true category, columns = predicted):
+
+| true \ predicted | billing | delivery | fraud | technical |
+|---|---|---|---|---|
+| billing | 38 | 0 | 0 | 0 |
+| delivery | 0 | 36 | 0 | 0 |
+| fraud | 11 | 0 | 23 | 0 |
+| technical | 10 | 0 | 0 | 29 |
+
+The few-shot prompt costs about 92 more tokens per classified ticket (157.33 versus 65.01), 13,572 more tokens in total, and removes all 21 zero-shot errors, so each corrected ticket costs about 646 tokens. It is worth paying when errors are expensive: 11 of the 34 fraud tickets (32%) were mislabelled as billing and would miss the security team's 2-hour handover. It is not worth paying for low-stakes bulk sorting where an error only means a slightly slower queue.
+
+### C7. Budget and routing
+Budget demo: zero-shot with `TOKEN_BUDGET = 6000` (prompt about 33 tokens) stopped after 6,017 tokens (the check happens before each call, so the last call may cross the budget); 58 tickets ended `budget_exhausted` and went to human review. Saved to `outputs/triage_budget_demo.csv`.
+
+Final run: few-shot, `TOKEN_BUDGET = 100000`, saved to `outputs/triage_results.csv` (164 rows). Routing: skipped, flagged and exhausted tickets go to `human_review` (NORMAL); otherwise fraud goes to `security_team` (HIGH); otherwise premium customers (from `outputs/customer_segments.csv`) go to `premium_desk` (HIGH); everything else goes to `support_queue` (NORMAL). A customer missing from the segment file is treated as not premium.
+
+| Route | Priority | Tickets |
+|---|---|---|
+| human_review | NORMAL | 17 (4 empty, 4 long, 9 invalid output) |
+| security_team | HIGH | 34 |
+| premium_desk | HIGH | 11 |
+| support_queue | NORMAL | 102 |
+
+Rule-validated by code (JSON or single-keyword check): 147 tickets. Sent to humans: 17 tickets.
+
