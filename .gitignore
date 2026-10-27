@@ -1,3 +1,5 @@
 .env
 .venv/
 __pycache__/
+outputs/_rfm_tmp.pkl
+outputs/_segment_profile.csv

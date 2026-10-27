@@ -1,3 +1,133 @@
+# Instamart Customer Intelligence & Support Copilot
+
+## Overview
+
+This repository contains the Instamart Customer Intelligence & Support Copilot, built in four connected Parts on synthetic, fictional data (all amounts in INR).
+
+| Part | What it does | Main files |
+|---|---|---|
+| A | Cleans the raw exports, stores them in SQLite, answers business questions in SQL and pandas | `src/part_a_*.py`, `sql/queries.sql`, `data/instamart.db` |
+| B | RFM segments (K-means, K=4) and a lapse-prediction model | `src/part_b_*.py`, `outputs/customer_segments.csv`, `outputs/lapse_model.joblib`, `outputs/retention_list.csv` |
+| C | Support-ticket triage with privacy, retry, validation and budget guardrails | `src/part_c_triage.py`, `outputs/triage_results.csv`, `outputs/triage_budget_demo.csv` |
+| D | Policy RAG assistant and a tool-using refund agent with safe stopping and resume | `src/part_d_rag.py`, `src/part_d_agent.py`, `outputs/agent_runs.jsonl`, `outputs/refund_ledger.jsonl`, `state/` |
+
+`generate_data.py` and `mock_llm.py` are the supplied files and are committed unmodified. No API key, account or network call is used anywhere: every model call goes through the offline `mock_llm.py`. Libraries: Python standard library, pandas, numpy, scikit-learn, joblib. Parts chain: Part B reads Part A's clean CSVs, Part C reads Part B's segment file, and Part D's agent reads Part A's database.
+
+## Reproduce
+
+Run from the repository root, in this order (Python 3.11 or newer). On Linux/macOS activate with `source .venv/bin/activate`; on Windows PowerShell use `.\.venv\Scripts\Activate.ps1`.
+
+1. `python -m venv .venv`
+2. Activate the environment (see above)
+3. `pip install -r requirements.txt`
+4. `python generate_data.py` (last line: `generated: customers=1200 products=40 orders_raw=13084 tickets=164`)
+5. `python src/part_a_clean.py`
+6. `python src/validate_part_a.py` (prints `ALL CHECKPOINTS PASSED`)
+7. `python src/part_a_sql.py`
+8. `python src/part_a_pandas.py`
+9. `python src/part_b_segments.py`
+10. `python src/part_b_finalize.py` (reads the temporary file written by step 9)
+11. `python src/part_b_lapse.py`
+12. `python src/part_c_triage.py`
+13. `python src/part_d_rag.py`
+14. `python src/part_d_agent.py` (clears and rewrites the ledger, run log and `state/` first, so it can be re-run safely)
+
+Every script uses relative paths and fixed seeds (`random_state=42`, `random.seed(42)`). The two temporary files `outputs/_rfm_tmp.pkl` and `outputs/_segment_profile.csv` are created by step 9 and are not committed.
+
+## Part A
+
+### A1. Setup
+
+Repository on branch `main`, isolated virtual environment (`python -m venv .venv`), libraries installed with `pip`, `requirements.txt` written with `pip freeze`, `.gitignore` listing `.env`, `.venv/` and `__pycache__/`. The two supplied files were copied unmodified and `python generate_data.py` printed `generated: customers=1200 products=40 orders_raw=13084 tickets=164`.
+
+### A2. Audit of the raw data
+
+| Table | Shape | Columns and data types |
+|---|---|---|
+| customers | 1200 x 5 | customer_id str, city str, signup_date str, age float64, gender str |
+| products | 40 x 4 | product_id str, product_name str, category str, price_inr int64 |
+| orders | 13084 x 9 | order_id str, customer_id str, product_id str, quantity int64, order_ts str, status str, discount_pct int64, order_amount str, delivery_minutes float64 |
+
+Missing values (all other columns have none): customers `age` 61 (5.08%), `gender` 30 (2.50%); orders `order_amount` 53 (0.41%), `delivery_minutes` 2,541 (19.42%). The 53 missing amounts are the `N/A` entries, which pandas reads as missing; the remaining unparseable entries are the text `error`, so together there are 120 non-numeric amounts.
+
+| Audit figure | Value |
+|---|---|
+| Raw order rows | 13,084 |
+| Exact duplicate rows | 119 |
+| Rows with status `pending` | 656 |
+| Distinct `order_id` | 12,309 |
+| Non-numeric `order_amount` | 120 |
+| Negative `delivery_minutes` | 106 |
+| Blank `delivery_minutes` | 2,541 |
+| Blank `age` | 61 |
+| `age` outside 10-100 | 6 |
+| Distinct raw `city` spellings | 24 |
+| Distinct non-blank raw `gender` spellings | 10 |
+| Blank `gender` | 30 |
+
+### A3. Cleaning `customers`
+
+Rules: (a) strip spaces and apply title case to `city`; (b) map every gender spelling to `male`, `female` or `unknown` (blank becomes `unknown`); (c) set ages outside 10-100 to missing, then fill all missing ages with the median age of the customer's city (`groupby` + `transform`); (d) convert `signup_date` to datetime.
+
+Result: Pune 227, Delhi 210, Bengaluru 197, Chennai 191, Hyderabad 191, Mumbai 184; female 610, male 560, unknown 30. Six out-of-range ages were set to missing and 67 ages were filled in total (61 blank + 6). There are 0 missing ages and every age lies between 18 and 60.
+
+### A4. Cleaning `orders`
+
+| Step | Rule | Rows or values affected |
+|---|---|---|
+| 1 | Convert `order_ts` to datetime | all rows |
+| 2 | Remove exact duplicate rows | 119 removed |
+| 3 | Keep only the record with the latest `order_ts` per `order_id` | 656 older (pending) records removed |
+| 4 | Convert `order_amount` to numeric; fill missing from `round(price_inr * quantity * (1 - discount_pct/100), 2)` | 112 amounts filled |
+| 5a | Set negative `delivery_minutes` to missing | 105 values set to missing |
+| 5b | Fill missing delivery of `completed` orders with the median of that product category among completed orders (`groupby` + `transform`) | 774 values imputed |
+| 5c | Leave `delivery_minutes` missing for `cancelled` orders (never delivered, so imputing would invent data) | 1,199 left missing |
+
+The audit counts 106 negative delivery times but the cleaning step changes 105, because one negative value sat on a row that was removed in step 2 or 3.
+
+Result: 12,309 rows (one per `order_id`); 11,110 completed and 1,199 cancelled; no pending rows; 0 missing `order_amount`; 0 missing delivery among completed orders; completed revenue INR 2,998,668.80.
+
+### A5. Storage and validation
+
+The clean tables are written to `data/clean/customers.csv`, `products.csv`, `orders.csv` and to `data/instamart.db` (tables `customers`, `products`, `orders`; `order_ts` stored as text `YYYY-MM-DD HH:MM:SS`). `src/validate_part_a.py` asserts 15 reference checkpoints and prints `ALL CHECKPOINTS PASSED`.
+
+### A6. SQL analysis (`sql/queries.sql`, run with `pd.read_sql_query`)
+
+| Query | Technique | Result |
+|---|---|---|
+| Q1 | WHERE (`order_amount > 500`) then HAVING (total > 8000) | 30 customers |
+| Q2 | Three-table join, revenue by city and category | 30 rows; total INR 2,998,668.80; largest cell Bengaluru / Electronics INR 233,909.45 |
+| Q3 | Scalar subquery, price above catalogue average | 11 products |
+| Q4 | LEFT JOIN, customers with no completed order | 25 customers |
+| Q5 | Two CTEs, customers above the average total spend | 550 customers; average INR 2,552.06 |
+| Q6 | RANK, DENSE_RANK, ROW_NUMBER partitioned by city | see below |
+| Q7 | Daily revenue with running total | 183 rows; final cumulative INR 2,998,668.80 |
+
+Q6 top customer per city: Bengaluru C0082 (12,856.20), Chennai C0930 (10,151.40), Delhi C0291 (13,742.60), Hyderabad C0743 (12,730.05), Mumbai C0693 (14,766.55), Pune C0426 (10,377.10). Exactly 8 rows have `RANK()` different from `ROW_NUMBER()`: when two customers in a city have the same total spend, `RANK()` gives them the same rank while `ROW_NUMBER()` still gives them different consecutive numbers, so the two differ for the tied rows and for the rows after them. Spend is rounded to 2 decimals inside the CTE so that equal totals tie exactly.
+
+### A7. pandas cross-check and exploratory analysis
+
+The `pd.pivot_table(..., margins=True)` grand total equals the SQL total, INR 2,998,668.80.
+
+| City | Sum (INR) | Mean (INR) | Count |
+|---|---|---|---|
+| Bengaluru | 523,643.40 | 276.47 | 1,894 |
+| Chennai | 463,629.15 | 272.72 | 1,700 |
+| Delhi | 502,829.80 | 243.62 | 2,064 |
+| Hyderabad | 528,589.90 | 284.95 | 1,855 |
+| Mumbai | 479,058.50 | 297.00 | 1,613 |
+| Pune | 500,918.05 | 252.48 | 1,984 |
+
+Completed `order_amount`: mean 269.91, median 135.00, skewness 4.61, Q1 64.80, Q3 297.00, IQR 232.20, fences -283.50 and 645.30, with 0 outliers below the lower fence and 897 above the upper fence. The correlation with the largest absolute value is `order_amount` with `discount_pct` at about -0.095; `order_amount` with `quantity` is +0.087.
+
+- **What is this data about?** Six months of quick-commerce orders (April to September 2025) across six cities, with products, discounts and delivery times.
+- **Distributions and statistics?** Order amounts are strongly right-skewed: the mean (269.91) is about double the median (135.00), and most orders are small grocery and dairy baskets.
+- **Outliers or anomalies?** 897 orders exceed the upper fence of 645.30. They are genuine electronics purchases, so they are kept, not treated as errors. The real anomalies were the planted duplicates, impossible ages and negative delivery times, which were cleaned earlier.
+- **Relationships?** All correlations are weak; the largest, `order_amount` vs `discount_pct` at -0.095, is small, and a correlation of this size does not establish causation.
+
+## Part B
+
+
 ### B1. RFM table
 Snapshot 2025-10-01 00:00:00, completed orders only. 1,175 customers. Recency median 19 days (min 0, max 180); frequency mean 9.46 (max 33); monetary mean INR 2,552.06 (max INR 14,766.55).
 
@@ -68,6 +198,9 @@ Top 5 random-forest importances: frequency 0.280, monetary 0.271, recency 0.115,
 Logistic regression coefficients (standardised features, C=100): frequency -1.70 (more orders, much less likely to lapse); recency +0.04 (a longer gap makes lapse slightly more likely, a very weak effect); monetary +0.28 (positive once frequency is held fixed, which is counter-intuitive and is most likely an artefact of monetary and frequency being strongly correlated, so it should not be read as "big spenders lapse").
 The selected model was saved with `joblib.dump` to `outputs/lapse_model.joblib`; the reloaded model reproduces the original test predictions exactly.
 Retention list (`outputs/retention_list.csv`): top 10 Premium customers of the test set by predicted lapse probability (highest 0.487); 1 of the 10 truly lapsed. This list is illustrative and not a leakage-free evaluation, because the Premium flag comes from the whole-window RFM of task 3, which includes the September window that defines the lapse label.
+
+
+## Part C
 
 
 ### C1. Input guardrails
@@ -215,3 +348,16 @@ ReAct makes one model call per step. Measured: S1 and S2 took 5 calls (1,067 tok
 The cost is rigidity. The plan is written before any observation, so it cannot know that an order is missing (S6), cancelled (S5), on time (S4) or above INR 1000 (S3, which needed `escalate_to_human` instead of `issue_refund`). It must either contain conditional branches or replan after an unexpected observation, and each replan adds calls and tokens back. In ReAct each observation decides the next step: S6 stopped after 2 calls on NOT_FOUND, and S5 stopped after the policy search without calling `calculate_refund`.
 
 For this refund workflow I would choose ReAct. Money is involved, the correct path depends on real order data, and the extra two or three calls are cheap. The hard limits (6 calls, token cap, timeout) already bound its cost, as S7 shows: it was stopped at 6 calls and 3,204 tokens.
+
+
+
+## Limitations and Next Steps
+
+- **The Premium flag is a post-hoc whole-window label.** It comes from RFM over the whole order window, which includes September, the month that defines the lapse label, so the retention list is illustrative and not a leakage-free evaluation (1 of its 10 customers truly lapsed). The model's own features use only orders before 2025-09-01.
+- **Synthetic data and a mock model.** All results come from generated data and the rule-based `mock_llm.py`. The 85.7% zero-shot and 100% few-shot accuracies reflect the mock's keyword behaviour and would not carry over to a real model.
+- **Single split.** The lapse model was evaluated on one 80/20 split (232 test customers), so test F1 (0.655 for the random forest) carries noticeable uncertainty. Repeated cross-validation would give a steadier estimate.
+- **Decision threshold.** The lapse model uses the default 0.5 threshold. Lowering it would catch more lapsing customers at the cost of more wrongly targeted loyal ones, which suits a retention campaign where a missed lapser costs more than an unnecessary offer.
+- **TF-IDF retrieval** matches exact words only, so a differently worded question can miss the right chunk. Embeddings or a synonym list would help. Chunk size and overlap were fixed by the brief and not tuned.
+- **Refund agent.** The refund rules are hard-coded (completed, more than 45 minutes, escalation above INR 1000) and the 7-day window is assumed met. A real deployment would check the date window, fraud signals and duplicate requests.
+- **Imputation.** Missing ages and delivery times are filled with medians, which keeps the data complete but understates real variation.
+- **Next steps:** a leakage-free Premium definition computed before the cutoff, threshold tuning for the lapse model, a plan-and-execute variant of the agent with replanning, and a single script that runs the whole Reproduce sequence.
