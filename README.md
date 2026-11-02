@@ -83,7 +83,7 @@ Result: Pune 227, Delhi 210, Bengaluru 197, Chennai 191, Hyderabad 191, Mumbai 1
 | 5b | Fill missing delivery of `completed` orders with the median of that product category among completed orders (`groupby` + `transform`) | 774 values imputed |
 | 5c | Leave `delivery_minutes` missing for `cancelled` orders (never delivered, so imputing would invent data) | 1,199 left missing |
 
-The audit counts 106 negative delivery times but the cleaning step changes 105, because one negative value sat on a row that was removed in step 2 or 3.
+The audit counts 106 negative delivery times but step 5a changes 105, because one negative value sits on a row that was duplicated exactly, so the raw file counts it twice and step 2 removes the extra copy (checked: 106 negatives in the raw file, 105 after step 2, 105 after step 3). Likewise the 120 unparseable amounts in the raw file become 112 filled values: 2 sat on exact-duplicate rows removed in step 2 and 6 on older pending records removed in step 3 (checked: 120 raw, 118 after step 2, 112 after step 3).
 
 Result: 12,309 rows (one per `order_id`); 11,110 completed and 1,199 cancelled; no pending rows; 0 missing `order_amount`; 0 missing delivery among completed orders; completed revenue INR 2,998,668.80.
 
@@ -122,7 +122,7 @@ Completed `order_amount`: mean 269.91, median 135.00, skewness 4.61, Q1 64.80, Q
 
 - **What is this data about?** Six months of quick-commerce orders (April to September 2025) across six cities, with products, discounts and delivery times.
 - **Distributions and statistics?** Order amounts are strongly right-skewed: the mean (269.91) is about double the median (135.00), and most orders are small grocery and dairy baskets.
-- **Outliers or anomalies?** 897 orders exceed the upper fence of 645.30. They are genuine electronics purchases, so they are kept, not treated as errors. The real anomalies were the planted duplicates, impossible ages and negative delivery times, which were cleaned earlier.
+- **Outliers or anomalies?** 897 orders exceed the upper fence of 645.30. Of these, 635 (71%) are electronics orders and the other 262 are dairy (166), grocery (52) and personal care (44) orders; they look like genuine large baskets, so they are kept, not treated as errors.
 - **Relationships?** All correlations are weak; the largest, `order_amount` vs `discount_pct` at -0.095, is small, and a correlation of this size does not establish causation.
 
 ## Part B
@@ -184,7 +184,7 @@ Test set (lapsed class as positive; confusion matrix rows = actual, columns = pr
 **Selected model: random forest** (chosen on cross-validated F1, test F1 0.655 is at least 0.55). Missing a customer who is about to lapse costs all of that customer's future revenue, while wrongly targeting a loyal customer costs only a small coupon or message, so recall matters more than precision here. Both models reach the same recall (0.652), but the forest has the higher cross-validated F1 (0.681 versus 0.651) and slightly higher test precision (0.659 versus 0.644), so it wastes fewer offers. If the team wants to catch more lapsers, the decision threshold can be lowered on top of this model.
 
 ### B7. Class-balance experiment
-Lapsed training rows were randomly duplicated (with replacement, random_state=42) until both classes had 570 rows; the best logistic regression was refitted; the test set is unchanged.
+Lapsed training rows were randomly duplicated (with replacement, random_state=42) until both classes had 570 rows; the best logistic regression was refitted; the test set is unchanged. Section B7 shows that the balanced logistic regression reaches a higher recall (0.854) and F1 (0.697) on the same test set, so it is the better operating point if recall is the priority; the random forest remains the saved model because it was selected on cross-validated F1 before that experiment.
 
 | Logistic regression | Precision | Recall | F1 |
 |---|---|---|---|
@@ -194,10 +194,15 @@ Lapsed training rows were randomly duplicated (with replacement, random_state=42
 Recall moved most (+0.20); precision did not rise (it fell by 0.055). For the retention team this means catching about 85% of lapsing customers instead of 65%, at the price of about 41% of the flagged customers being loyal ones, which is acceptable only if the offer is cheap.
 
 ### B8. Interpretation and persistence
-Top 5 random-forest importances: frequency 0.280, monetary 0.271, recency 0.115, avg_delivery 0.061, cancel_rate 0.053. How often and how much a customer buys are the strongest signals; time since last order and slow deliveries come next.
-Logistic regression coefficients (standardised features, C=100): frequency -1.70 (more orders, much less likely to lapse); recency +0.04 (a longer gap makes lapse slightly more likely, a very weak effect); monetary +0.28 (positive once frequency is held fixed, which is counter-intuitive and is most likely an artefact of monetary and frequency being strongly correlated, so it should not be read as "big spenders lapse").
+Top 5 random-forest importances: frequency 0.280, monetary 0.271, recency 0.115, avg_delivery 0.061, cancel_rate 0.053.    - frequency (0.280): how often a customer orders is the strongest single signal of whether they keep ordering.
+   - monetary (0.271): total spend is nearly as informative, though it overlaps with frequency.
+   - recency (0.115): the gap since the last order adds information beyond the order count.
+   - avg_delivery (0.061): slower average deliveries carry a small signal; this shows an association, not a cause.
+   - cancel_rate (0.053): the share of cancelled orders is the weakest of the five signals.
+Logistic regression coefficients (standardised features, C=100): frequency -1.70 (more orders, much less likely to lapse); recency +0.04 (a longer gap makes lapse slightly more likely, a very weak effect); monetary +0.28 (positive once frequency is held fixed, which is counter-intuitive and is most likely an artefact of monetary and frequency being strongly correlated, so it should not be read as "big spenders lapse").   The best C is 100, the upper edge of the prescribed grid, whereas the brief's reference run found C=1; the brief notes that results may differ because extra features are allowed, so the grid was not extended.
 The selected model was saved with `joblib.dump` to `outputs/lapse_model.joblib`; the reloaded model reproduces the original test predictions exactly.
 Retention list (`outputs/retention_list.csv`): top 10 Premium customers of the test set by predicted lapse probability (highest 0.487); 1 of the 10 truly lapsed. This list is illustrative and not a leakage-free evaluation, because the Premium flag comes from the whole-window RFM of task 3, which includes the September window that defines the lapse label.
+All ten probabilities lie between 0.452 and 0.487, below 0.5, so the ranking orders risk but does not label any of them as a probable lapser.
 
 
 ## Part C
