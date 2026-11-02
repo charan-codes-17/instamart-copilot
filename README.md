@@ -48,7 +48,19 @@ Repository on branch `main`, isolated virtual environment (`python -m venv .venv
 | products | 40 x 4 | product_id str, product_name str, category str, price_inr int64 |
 | orders | 13084 x 9 | order_id str, customer_id str, product_id str, quantity int64, order_ts str, status str, discount_pct int64, order_amount str, delivery_minutes float64 |
 
-Missing values (all other columns have none): customers `age` 61 (5.08%), `gender` 30 (2.50%); orders `order_amount` 53 (0.41%), `delivery_minutes` 2,541 (19.42%). The 53 missing amounts are the `N/A` entries, which pandas reads as missing; the remaining unparseable entries are the text `error`, so together there are 120 non-numeric amounts.
+Missing values per column (count and % of rows):
+
+| Table | Column | Missing | % |
+|---|---|---|---|
+| customers | age | 61 | 5.08% |
+| customers | gender | 30 | 2.50% |
+| customers | customer_id, city, signup_date | 0 | 0.00% |
+| products | all 4 columns | 0 | 0.00% |
+| orders | order_amount | 53 | 0.41% |
+| orders | delivery_minutes | 2,541 | 19.42% |
+| orders | the other 7 columns | 0 | 0.00% |
+
+The 53 missing amounts are the `N/A` entries, which pandas reads as missing; the other 67 unparseable entries are the text `error`, so together there are 120 non-numeric amounts.
 
 | Audit figure | Value |
 |---|---|
@@ -121,7 +133,7 @@ The `pd.pivot_table(..., margins=True)` grand total equals the SQL total, INR 2,
 Completed `order_amount`: mean 269.91, median 135.00, skewness 4.61, Q1 64.80, Q3 297.00, IQR 232.20, fences -283.50 and 645.30, with 0 outliers below the lower fence and 897 above the upper fence. The correlation with the largest absolute value is `order_amount` with `discount_pct` at about -0.095; `order_amount` with `quantity` is +0.087.
 
 - **What is this data about?** Six months of quick-commerce orders (April to September 2025) across six cities, with products, discounts and delivery times.
-- **Distributions and statistics?** Order amounts are strongly right-skewed: the mean (269.91) is about double the median (135.00), and most orders are small grocery and dairy baskets.
+- **Distributions and statistics?** Order amounts are strongly right-skewed: the mean (269.91) is about double the median (135.00), and most orders are small baskets (median INR 135).
 - **Outliers or anomalies?** 897 orders exceed the upper fence of 645.30. Of these, 635 (71%) are electronics orders and the other 262 are dairy (166), grocery (52) and personal care (44) orders; they look like genuine large baskets, so they are kept, not treated as errors.
 - **Relationships?** All correlations are weak; the largest, `order_amount` vs `discount_pct` at -0.095, is small, and a correlation of this size does not establish causation.
 
@@ -184,22 +196,27 @@ Test set (lapsed class as positive; confusion matrix rows = actual, columns = pr
 **Selected model: random forest** (chosen on cross-validated F1, test F1 0.655 is at least 0.55). Missing a customer who is about to lapse costs all of that customer's future revenue, while wrongly targeting a loyal customer costs only a small coupon or message, so recall matters more than precision here. Both models reach the same recall (0.652), but the forest has the higher cross-validated F1 (0.681 versus 0.651) and slightly higher test precision (0.659 versus 0.644), so it wastes fewer offers. If the team wants to catch more lapsers, the decision threshold can be lowered on top of this model.
 
 ### B7. Class-balance experiment
-Lapsed training rows were randomly duplicated (with replacement, random_state=42) until both classes had 570 rows; the best logistic regression was refitted; the test set is unchanged. Section B7 shows that the balanced logistic regression reaches a higher recall (0.854) and F1 (0.697) on the same test set, so it is the better operating point if recall is the priority; the random forest remains the saved model because it was selected on cross-validated F1 before that experiment.
+Lapsed training rows were randomly duplicated (with replacement, random_state=42) until both classes had 570 rows; the best logistic regression was refitted; the test set is unchanged.
 
 | Logistic regression | Precision | Recall | F1 |
 |---|---|---|---|
 | Original training set | 0.644 | 0.652 | 0.648 |
 | Balanced training set | 0.589 | 0.854 | 0.697 |
 
-Recall moved most (+0.20); precision did not rise (it fell by 0.055). For the retention team this means catching about 85% of lapsing customers instead of 65%, at the price of about 41% of the flagged customers being loyal ones, which is acceptable only if the offer is cheap.
+Recall moved most (+0.20); precision did not rise (it fell by 0.055). For the retention team this means catching about 85% of lapsing customers instead of 65%, at the price of about 41% of the flagged customers being loyal ones, which is acceptable only if the offer is cheap. The balanced logistic regression therefore reaches a higher recall (0.854) and F1 (0.697) than the unbalanced one, so it is the better operating point if recall is the priority; the random forest remains the saved model because it was selected on cross-validated F1 before this experiment.
 
 ### B8. Interpretation and persistence
-Top 5 random-forest importances: frequency 0.280, monetary 0.271, recency 0.115, avg_delivery 0.061, cancel_rate 0.053.    - frequency (0.280): how often a customer orders is the strongest single signal of whether they keep ordering.
-   - monetary (0.271): total spend is nearly as informative, though it overlaps with frequency.
-   - recency (0.115): the gap since the last order adds information beyond the order count.
-   - avg_delivery (0.061): slower average deliveries carry a small signal; this shows an association, not a cause.
-   - cancel_rate (0.053): the share of cancelled orders is the weakest of the five signals.
-Logistic regression coefficients (standardised features, C=100): frequency -1.70 (more orders, much less likely to lapse); recency +0.04 (a longer gap makes lapse slightly more likely, a very weak effect); monetary +0.28 (positive once frequency is held fixed, which is counter-intuitive and is most likely an artefact of monetary and frequency being strongly correlated, so it should not be read as "big spenders lapse").   The best C is 100, the upper edge of the prescribed grid, whereas the brief's reference run found C=1; the brief notes that results may differ because extra features are allowed, so the grid was not extended.
+Top 5 random-forest importances: frequency 0.280, monetary 0.271, recency 0.115, avg_delivery 0.061, cancel_rate 0.053.
+
+- frequency (0.280): how often a customer orders is the strongest single signal of whether they keep ordering.
+- monetary (0.271): total spend is nearly as informative, though it overlaps with frequency.
+- recency (0.115): the gap since the last order adds information beyond the order count.
+- avg_delivery (0.061): slower average deliveries carry a small signal; this shows an association, not a cause.
+- cancel_rate (0.053): the share of cancelled orders is the weakest of the five signals.
+
+Logistic regression coefficients (standardised features, C=100): frequency -1.70 (more orders, much less likely to lapse); recency +0.04 (a longer gap makes lapse slightly more likely, a very weak effect); monetary +0.28 (positive once frequency is held fixed, which is counter-intuitive and is most likely an artefact of monetary and frequency being strongly correlated, so it should not be read as "big spenders lapse").
+
+The best C is 100, the upper edge of the prescribed grid, whereas the brief's reference run found C=1; the brief notes that results may differ because extra features are allowed, so the grid was not extended.
 The selected model was saved with `joblib.dump` to `outputs/lapse_model.joblib`; the reloaded model reproduces the original test predictions exactly.
 Retention list (`outputs/retention_list.csv`): top 10 Premium customers of the test set by predicted lapse probability (highest 0.487); 1 of the 10 truly lapsed. This list is illustrative and not a leakage-free evaluation, because the Premium flag comes from the whole-window RFM of task 3, which includes the September window that defines the lapse label.
 All ten probabilities lie between 0.452 and 0.487, below 0.5, so the ranking orders risk but does not label any of them as a probable lapser.
@@ -310,7 +327,7 @@ With zero overlap two questions break. "What delivery time makes a completed ord
 
 ### Tasks 5-8: Refund agent
 
-Script: `src/part_d_agent.py` (imports `retrieve` from `src/part_d_rag.py`). Running it clears and rewrites `outputs/agent_runs.jsonl`, `outputs/refund_ledger.jsonl`, `outputs/agent_demos.json` and `state/`, so every run reproduces the same files.
+Script: `src/part_d_agent.py` (imports `retrieve` from `src/part_d_rag.py`). Running it clears and rewrites `outputs/agent_runs.jsonl`, `outputs/refund_ledger.jsonl`, `outputs/agent_demos.json` and `state/`, so every run reproduces the same files; the ledger differs only in its timestamps.
 
 **Tools (task 5).** `TOOLS_SPEC` lists five tools and `TOOL_MAP` maps each name to its Python function: `get_order` (reads `data/instamart.db`), `search_policy` (returns `retrieve` output under `results`), `calculate_refund` (100% of the order amount if delivery took more than 45 minutes, otherwise 0), `issue_refund` and `escalate_to_human` (each append one JSON line with a timestamp and the tool name to `outputs/refund_ledger.jsonl`). The agent looks the requested name up in `TOOL_MAP` and calls the function with the model's `arguments`.
 
